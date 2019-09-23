@@ -128,7 +128,7 @@ class DQN():
 
         if self.frame_count % self.model_transfer_freq == 0:
             self.model_target.set_weights(self.model.get_weights())
-            self.model.save(f'./saved_models/cartpole_{self.frame_count}.h5') # Back up progress thus far
+            self.model.save(f'./cartpole_{self.frame_count}.h5') # Back up progress thus far
 
         return history.history['loss'][0]
 
@@ -199,7 +199,7 @@ class DQN():
 
         return np.mean(scores), np.mean(average_Qs)
 
-    def run(self):
+    def train(self):
 
         scores = []
         average_Qs = []
@@ -246,20 +246,20 @@ class DQN():
 
                     break
 
-        self.model.save(f'./saved_models/cartpole_{self.frame_count}.h5') # Back up progress thus far
+        self.model.save(f'./cartpole_{self.frame_count}.h5') # Back up progress thus far
         score, average_Q = self.evaluate()
         scores.append((self.frame_count, score))
         average_Qs.append((self.frame_count, average_Q))
         epsilons.append((self.frame_count, self.epsilon))
         self.plot(scores, average_Qs, losses, epsilons, display=True)
-        self.evaluate(n_games=10, saved_model=f'./saved_models/cartpole_{self.frame_count}.h5', render = True)
+        self.evaluate(n_games=10, saved_model=f'./cartpole_{self.frame_count}.h5', render = True)
 
 if __name__ == "__main__":
 
     agent = DQN()
     
     # Uncomment to train:
-    agent.run()
+    agent.train()
     
-    # Uncomment to play only (select correct model to load):
-    # agent.evaluate(n_games=10, saved_model='./saved_models/cartpole_120000.h5', render = True)
+    # Uncomment to evaluate (select correct model to load):
+    # agent.evaluate(n_games=10, saved_model='./cartpole.h5', render = True)
