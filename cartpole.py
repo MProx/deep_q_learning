@@ -1,55 +1,61 @@
 import numpy as np
 import gym
 import tensorflow as tf # v2.0
-import random
-import itertools
 import os
-from tensorflow.keras.layers import Dense
+from tensorflow.keras.layers import Dense, Dropout
 from tensorflow.python.client import device_lib
+
 from collections import deque
 import matplotlib.pyplot as plt
+
+import cProfile
+import pstats
 
 class buffer():
     def __init__(self, maxlen):
         self.memory = deque(maxlen=maxlen)
         self.state_memory = deque(maxlen=maxlen)
 
-    def remember(self, action, reward, state_, done):
-        self.memory.append([action, reward, done])
-        self.state_memory.append(state_)
+    def remember(self, state, action, reward, state_, done):
+        self.memory.append([state, action, reward, state_, done])
 
     def sample(self, stack_size, batch_size):
+        
+        # Extract
         indices = np.random.randint(low = stack_size, high = len(self.memory), size = batch_size)
         minibatch = [self.memory[i] for i in indices]
-        states      = np.stack(axis=0, arrays=[self.state_memory[i-1] for i in indices])
-        states_new  = np.stack(axis=0, arrays=[self.state_memory[i] for i in indices])
-        actions     = np.stack(axis=0, arrays=[a for a, r, t in minibatch])
-        rewards     = np.stack(axis=0, arrays=[r for a, r, t in minibatch])
-        terminals   = np.stack(axis=0, arrays=[t for a, r, t in minibatch])
+        transitions = list(zip(*minibatch))
+        states      = np.stack(transitions[0], axis=0)
+        actions     = np.stack(transitions[1], axis=0)
+        rewards     = np.stack(transitions[2], axis=0)
+        terminals   = np.stack(transitions[4], axis=0)
+        states_new  = np.stack(transitions[3], axis=0)
 
         return states, actions, rewards, states_new, terminals
 
 class DQN():
     def __init__(self):
         self.env_name = "CartPole-v1"
-        self.epsilon = 1.0 # Starting value
-        self.epsilon_min = 0.00 # Final value
-        self.epsilon_decay_frames = 40000 # Amount to subtract each frame
-        self.n_steps = 500
-        self.n_episodes = 20000
-        self.memory_size = 100000
-        self.obs_max = [1.5, 1, 0.41887903, 1]     # Approximate upper lim for observations (used for normalizing)
-        self.obs_min = [-1.5, -1, -0.41887903, -1] # Approximate upper lim for observations (used for normalizing)
-        self.batch_size = 126
-        self.d_min = 10000
-        self.gamma = 0.85
+        self.epsilon = 1.0      # Starting epsilon value
+        self.epsilon_min = 0.05 # Final epsilon value
+        self.epsilon_decay_frames = 25000 # Amount to subtract each frame
+        self.gamma = 0.99       # Future reward discount factor
+        self.n_steps = 500      # Max steps per game
+        self.n_frames = 60000   # Frames before termination
+        self.memory_size = 200000 # Replay memory size (number of transitions to store)
+        self.d_min = 10000      # Disable training before collecting minimum number of transitions
         self.plot_update_freq = 20
-        self.model_transfer_freq = 100 # number of frames between transfer of weights from training network to prediction network
-        self.img_stack_count = 1
+        self.stack_count = 1
+
+        # Network parameters:
+        self.learning_rate = 0.001
+        self.n_hidden_nodes = 32
+        self.batch_size = 32
+        self.model_transfer_freq = 10000 # number of frames between transfer of weights from training network to prediction network
 
         self.tf_setup()
-        self.epsilon_decay_value = (self.epsilon - self.epsilon_min)/self.epsilon_decay_frames
         self.env = gym.make(self.env_name)
+        self.epsilon_decay_value = (self.epsilon - self.epsilon_min)/self.epsilon_decay_frames
         self.n_observations = self.env.observation_space.shape[0]
         self.n_actions = self.env.action_space.n
         self.model_target, self.model = self.build_model()
@@ -74,32 +80,21 @@ class DQN():
             print("CAUTION: No available GPUs. Running on CPU.")
 
     def build_model(self):
-        Inputs = tf.keras.Input(shape=(self.n_observations,), name='img_input')
-        H1 = Dense(256, activation="relu")(Inputs)
-        H2 = Dense(256, activation="relu")(H1)
-        Output = Dense(self.n_actions, activation="linear")(H2)
+        Inputs = tf.keras.Input(shape=(self.n_observations,))
+        x = Dense(self.n_hidden_nodes, activation="tanh")(Inputs)
+        Output = Dense(self.n_actions, activation="linear")(x)
         
-        # optimizer=tf.optimizers.Adam(lr=self.learning_rate, decay=self.learning_rate_decay)
-        optimizer=tf.optimizers.RMSprop(learning_rate=5E-6, rho=0.95) # use default valules
+        optimizer=tf.optimizers.RMSprop(learning_rate=self.learning_rate) # use default valules
 
         model_train = tf.keras.Model(inputs=Inputs, outputs=Output)
-        model_train.compile(optimizer, loss=tf.keras.losses.Huber())
-        
         model_predict = tf.keras.Model(inputs=Inputs, outputs=Output)
+
+        model_train.compile(optimizer, loss=tf.keras.losses.Huber())        
         model_predict.compile(optimizer, loss=tf.keras.losses.Huber())
         
         model_predict.set_weights(model_train.get_weights())
         
         return model_train, model_predict
-
-    def preprocess(self, observation):
-        return [(obs - self.obs_min[i])/(self.obs_max[i] - self.obs_min[i]) for i, obs in enumerate(observation)]
-            
-    def episode_setup(self):
-
-        observation = self.env.reset()
-        state = self.preprocess(observation)
-        return state
 
     def choose_action(self, state):
 
@@ -110,23 +105,22 @@ class DQN():
             input = np.expand_dims(state, axis = 0)
             return np.argmax(self.model.predict(input)).astype(np.int8)
         else:
-            # Random policy
             return np.random.randint(0, self.n_actions)
 
     def train_batch(self):
 
+        # Dont train during pre-training phase (pre-fill memory)
         if self.frame_count < self.d_min:
-            return 0
+            return 0 
 
-        # Extract minibatch (never select index 0 - there must always be one previous):
-        states, actions, rewards, states_new, terminals = self.memory.sample(self.img_stack_count, self.batch_size)
+        # Extract minibatch:
+        states, actions, rewards, states_new, terminals = self.memory.sample(self.stack_count, self.batch_size)
 
         # Calculate discounted future reward
         discounted_max_future_reward = self.gamma * np.max(self.model_target.predict(states_new), axis = 1)
         discounted_max_future_reward[np.where(terminals == True)] = 0 # terminal states have no future reward
 
         targets = self.model.predict(states)
-
         for i in range(self.batch_size):
             targets[i, actions[i]] = rewards[i] + discounted_max_future_reward[i]
 
@@ -134,89 +128,138 @@ class DQN():
 
         if self.frame_count % self.model_transfer_freq == 0:
             self.model_target.set_weights(self.model.get_weights())
+            self.model.save(f'./saved_models/cartpole_{self.frame_count}.h5') # Back up progress thus far
 
         return history.history['loss'][0]
 
-    def plot(self, frames, scores, losses, epsilons, display=False):
-        # find average of scores:
-        average_scores = [scores[0]]
-        for s in scores[1:]:
-            average_scores.append(average_scores[-1]*0.9 + s*0.1)
+    def plot(self, scores, average_Qs, losses, epsilons, display=False):
+    
+        f, axes = plt.subplots(2, 2, sharex=True, figsize=(12,6))
 
-        # plot:
-        f, (ax1, ax2, ax3) = plt.subplots(3, 1, sharex=True)
-        ax1.plot(frames, scores, 'o', markersize=1)
-        ax1.plot(frames, average_scores, linewidth=1, color='red')
-        ax2.plot(frames, losses)
-        ax3.plot(frames, epsilons)
-        ax1.set_ylim([0, 510])
-        ax3.set_ylim([0, 1])
-        ax1.set_ylabel('Score')
-        ax2.set_ylabel('Loss')
-        ax3.set_ylabel('Epsilon')
-        ax3.set_xlabel('Frame')
+        scores_array = np.array(scores)
+        losses_array = np.array(losses)
+        epsilons_array = np.array(epsilons)
+        average_Qs_array = np.array(average_Qs)
+
+        axes[0, 0].plot(scores_array[:, 0], scores_array[:, 1])
+        axes[1, 0].plot(losses_array[:, 0], losses_array[:, 1])
+        axes[0, 1].plot(epsilons_array[:, 0], epsilons_array[:, 1])
+        axes[1, 1].plot(average_Qs_array[:, 0], average_Qs_array[:, 1])
+        
+        axes[0, 0].set_ylim([0, 510])
+        axes[0, 1].set_ylim([0, 1])        
+        axes[0, 0].set_ylabel('Average Evaluation Score')
+        axes[1, 0].set_ylabel('Loss')
+        axes[0, 1].set_ylabel('Epsilon')
+        axes[1, 1].set_ylabel('Average Action Value')
+        axes[1, 1].set_xlabel('Frame')
+        axes[1, 0].set_xlabel('Frame')
+        
         plt.savefig('progress.jpg', format='jpg')
+        
         if display:
             plt.show()
         else:
             plt.close()
 
+    def evaluate(self, n_games=10, saved_model=None, render = False, epsilon_eval=0.0):
+
+        if saved_model is None:
+            play_model = self.model
+        else:
+            print("Loading model")
+            play_model = tf.keras.models.load_model(saved_model)
+
+        scores = []
+        average_Qs = []
+        for game in range(n_games):
+
+            state = self.env.reset()
+            score = 0
+            for step in range(self.n_steps):
+
+                if np.random.uniform() > epsilon_eval:
+                    input = np.expand_dims(state, axis = 0)
+                    Qs = play_model.predict(input)
+                    average_Qs.append(np.mean(Qs))
+                    action = np.argmax(Qs).astype(np.int8)
+                else:
+                    action = self.env.action_space.sample()
+                observation, reward, done, _ = self.env.step(action)
+
+                score += reward
+                state = observation
+
+                if render:
+                    self.env.render()
+
+                if done:
+                    scores.append(score)
+                    break
+
+        return np.mean(scores), np.mean(average_Qs)
 
     def run(self):
 
-        losses = []
         scores = []
+        average_Qs = []
+        losses = []
         epsilons = []
-        frames = []
+        episode = 0
+        
+        training_done = False
+        while not training_done:
 
-        for episode in range(self.n_episodes):
+            state = self.env.reset()
 
-            state = self.episode_setup()
-            episode_score = 0
-            episode_losses = []
-
-            self.memory.remember(0, 0, state, False)
             self.frame_count += 1
 
             for _ in range(self.n_steps): # game steps
 
                 action = self.choose_action(state)
-
                 observation, reward, done, _ = self.env.step(action)
-                state_new = self.preprocess(observation)
+                state_new = observation
 
-                self.memory.remember(action, reward, state_new, done)
+                self.memory.remember(state, action, reward, state_new, done)
+                state = state_new
 
                 # if self.epsilon <= self.epsilon_min:
                 #     self.env.render()
 
                 loss = self.train_batch()
+                losses.append((self.frame_count, loss))
 
-                episode_losses.append(loss)
                 self.frame_count += 1
-                episode_score += reward
 
-                state = state_new
+                if self.frame_count == self.n_frames:
+                    training_done = True
 
                 if done:
-                    
-                    frames.append(self.frame_count)
-                    scores.append(episode_score)
-                    losses.append(np.mean(episode_losses))
-                    epsilons.append(self.epsilon)
+                    episode += 1
 
-                    if episode % self.plot_update_freq == 0:
-                        print("episode:", episode, "F: ", self.frame_count, "E:", round(self.epsilon, 2), "S:", episode_score, "L:", round(np.mean(episode_losses), 2))
-                        # save plot every 10th episode
-                        # (overwrite previous plot)
-                        self.plot(frames, scores, losses, epsilons)
+                    if episode % self.plot_update_freq == 0:                        
+                        score, average_Q = self.evaluate()
+                        scores.append((self.frame_count, score))
+                        average_Qs.append((self.frame_count, average_Q))
+                        epsilons.append((self.frame_count, self.epsilon))
+                        self.plot(scores, average_Qs, losses, epsilons)
+
                     break
 
-        self.model.save(f'./cartpole.h5') # Back up progress thus far
-        self.plot(frames, scores, losses, epsilons, display=True)
+        self.model.save(f'./saved_models/cartpole_{self.frame_count}.h5') # Back up progress thus far
+        score, average_Q = self.evaluate()
+        scores.append((self.frame_count, score))
+        average_Qs.append((self.frame_count, average_Q))
+        epsilons.append((self.frame_count, self.epsilon))
+        self.plot(scores, average_Qs, losses, epsilons, display=True)
+        self.evaluate(n_games=10, saved_model=f'./saved_models/cartpole_{self.frame_count}.h5', render = True)
 
 if __name__ == "__main__":
 
     agent = DQN()
-
+    
+    # Uncomment to train:
     agent.run()
+    
+    # Uncomment to play only (select correct model to load):
+    # agent.evaluate(n_games=10, saved_model='./saved_models/cartpole_120000.h5', render = True)
