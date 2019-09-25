@@ -4,18 +4,15 @@ import gym_snake
 import tensorflow as tf # v2.0
 from tensorflow.keras.layers import Dense, Lambda, Flatten, Conv2D
 from tensorflow.python.client import device_lib
+import matplotlib.pyplot as plt
+
 import os
 import time
 from datetime import datetime
-
 from collections import deque
-import matplotlib.pyplot as plt
-
-import cProfile
-import pstats
 
 class DQN():
-    def __init__(self, n_frames):
+    def __init__(self):
 
         # ===============================
         # Hyperparameters:
@@ -23,11 +20,10 @@ class DQN():
 
         self.env_name = 'snake-v0'
         self.epsilon = 1.0          # Starting epsilon value
-        self.epsilon_min = 0.05     # Minimum epsilon value
+        self.epsilon_min = 0.1     # Minimum epsilon value
         self.epsilon_decay_frames = 1000000 # Amount to subtract each frame
-        self.gamma = 0.8            # Future reward discount factor
+        self.gamma = 0.85            # Future reward discount factor
         self.n_steps = 200          # Max steps per game
-        self.n_frames = n_frames    # Frames before termination
         self.memory_size = 1000000  # Replay memory size (number of transitions to store)
         self.d_min = 10000          # Disable training before collecting minimum number of transitions
         self.plot_update_freq = 100 # IN episodes
@@ -260,7 +256,7 @@ class DQN():
             
         return score/n_games, np.mean(game_frames), np.mean(average_Qs)
 
-    def train(self):
+    def train(self, n_frames=1000000):
 
         '''
         Main training function. This is the part that enacts and observes the markov chain:
@@ -275,7 +271,7 @@ class DQN():
         episode = 0
         
         start_time = time.time()
-        print(f"Starting training on {self.n_frames} game frames at {datetime.now()}")
+        print(f"Starting training on {n_frames} game frames at {datetime.now()}")
 
         training_done = False
         while not training_done:
@@ -305,7 +301,7 @@ class DQN():
 
                 self.frame_count += 1
 
-                if self.frame_count >= (self.n_frames+self.d_min):
+                if self.frame_count >= (n_frames+self.d_min):
                     training_done = True
 
                 if done:
@@ -361,17 +357,17 @@ class buffer():
 
 if __name__ == "__main__":
 
-    agent = DQN(n_frames=1000000)
+    agent = DQN()
     
     # Uncomment to train:
     # ===================
-    # agent.train()
+    agent.train(n_frames=1000000) # Train for 1 million game frames (6 - 8 hours)
 
     # Uncomment to evaluate (select correct model to load):
     # =====================================================
-    score, game_frames, average_Q =agent.evaluate(
-        n_games=10,
-        saved_model='./saved_models/snake_600000.h5',
-        epsilon_eval=0.0,
-        render = True,
-        max_steps=50)
+    # score, game_frames, average_Q = agent.evaluate(
+    #     saved_model='./saved_models/snake.h5', # comment to play with an untrained model
+    #     n_games=10,       # Play 10 episodes
+    #     epsilon_eval=0.0, # No random actions
+    #     max_steps=200,    # Terminate episode after 200 steps (avoid snake getting stuck in loops)
+    #     render = True)    # Render display to monitor
