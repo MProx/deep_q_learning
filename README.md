@@ -23,7 +23,27 @@ Repeat this a million times, updating the model with each state to fit data from
 - Numpy
 
 ## Usage:
-Clone this repository. Open DQN_snake.py, scroll to the bottom and uncomment the various options (i.e. to train the model or just play it), and execute the file. To edit hyperparameters, change the class variables in thier definition near the top of the file
+Clone this repository. To edit hyperparameters, change the class variables in thier definition near the top of the file.
+
+From the command like, execute the following to see all flags and options:
+
+> $ python DQN_snake.py --help
+
+To train the model with default parameters (default of 1,000,000 frames, 6 - 8 hours on my laptop), use the '-m'
+
+> $ python DQN_snake.py -m train
+
+To train the model on a different number of frames, use the '-n' flag:
+
+> $ python DQN_snake.py -m train -n 2000000
+
+To test the model on untrained weights and biases, use the '-m' flag (expect poor performance):
+
+> $ python DQN_snake.py -m test
+
+To supply a trained model file for exaluation, use the '-f' flag:
+
+> $ python DQN_snake.py -m test -f snake.h5
 
 ## TO DO:
 - The current model works, but it quite inefficient with memory. Each state (bitmap) is stored twice - once as the resulting state of one transition, and then again as the starting state of the next. I would like to implement a circular buffer system with indexing to allow storing of each frame only once.
