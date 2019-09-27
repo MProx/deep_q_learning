@@ -304,7 +304,6 @@ class DQN():
         
         start_time = time.time()
         print(f"Starting training on {n_frames} game frames at {datetime.now()}")
-        print(f'From the terminal, type "tensorboard --logdir {self.log_dir}" to start a TensorBoard server for logging.')
 
         training_done = False
         while not training_done:
@@ -316,9 +315,6 @@ class DQN():
             # Advance the frame count
             self.frame_count += 1
             episode_loss = []
-
-            if episode % self.eval_freq == 0:
-                print(f"starting episode {episode}")
 
             for _ in range(self.n_steps): # game steps
 
