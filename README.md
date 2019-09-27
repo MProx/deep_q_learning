@@ -40,7 +40,7 @@ To test the model on untrained weights and biases, use the '-m' flag (expect poo
 
 > $ python DQN_snake.py -m test
 
-To supply a trained model file for exaluation, use the '-f' flag:
+To supply a trained model file for evaluation, use the '-f' flag:
 
 > $ python DQN_snake.py -m test -f snake.h5
 
@@ -48,7 +48,7 @@ To edit hyperparameters, change the class variables in thier definition near the
 
 ## TO DO:
 
-- The current model works, but it quite inefficient with memory. Each state (int8 array) is stored twice - once as the resulting state of one transition, and then again as the starting state of the next. I would like to implement a circular buffer system with indexing to allow storing of each frame only once. However, this presents complications around how to handle what happens when an episode ends - you dont want the last frame of the previous episode to be incuded as the starting frame for a new episode.
+- The current model works, but it quite inefficient with memory. Each state (int8 array) is stored twice - once as the resulting state of one transition, and then again as the starting state of the next. I would like to implement a circular buffer system with indexing to allow storing of each frame only once. However, this presents complications around how to handle what happens when an episode ends - you dont want the last frame of the previous episode to be included as the starting frame for a new episode.
 
 - Possibly move all hyperparameters to a separate file, save in JSON format
 
