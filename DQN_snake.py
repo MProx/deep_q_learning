@@ -1,3 +1,4 @@
+import argparse
 import numpy as np
 import gym
 import gym_snake
@@ -12,7 +13,7 @@ from datetime import datetime
 from collections import deque
 
 class DQN():
-    def __init__(self):
+    def __init__(self, mode):
 
         # ===============================
         # Hyperparameters:
@@ -22,14 +23,14 @@ class DQN():
         self.epsilon = 1.0          # Starting epsilon value
         self.epsilon_min = 0.1     # Minimum epsilon value
         self.epsilon_decay_frames = 1000000 # Amount to subtract each frame
-        self.gamma = 0.85            # Future reward discount factor
+        self.gamma = 0.9            # Future reward discount factor
         self.n_steps = 200          # Max steps per game
         self.memory_size = 1000000  # Replay memory size (number of transitions to store)
         self.d_min = 10000          # Disable training before collecting minimum number of transitions
-        self.plot_update_freq = 100 # IN episodes
+        self.eval_freq = 100 # IN episodes
 
         # Network parameters:
-        self.learning_rate = 0.0025
+        self.learning_rate = 0.001
         self.conv1filters = 16
         self.conv1kernel = (4, 4)
         self.conv1stride = (2, 2)
@@ -41,14 +42,14 @@ class DQN():
         self.model_transfer_freq = 10000 # number of frames between transfer of weights from training network to prediction network
 
         # environment details:
-        self.grid_height = 8
-        self.grid_width = 8
+        self.grid_height = 10
+        self.grid_width = 10
         self.unit_size = 5  # Number of pixels of each grid point
         self.unit_gap = 0   # Disable pixels between grid points
         self.n_snakes = 1   # number of snakes (must be one)
-        self.n_foods = 3    # number of foods
+        self.n_foods = 3    # number of foods (Consider setting higher during training to make positive rewards more likely)
 
-        self.tf_setup()
+        self.tf_setup(mode)
         self.env = gym.make(self.env_name)
         self.env.unit_size = self.unit_size
         self.env.unit_gap = self.unit_gap
@@ -63,7 +64,7 @@ class DQN():
         self.frame_count = 0
         self.memory = buffer(maxlen=self.memory_size)
 
-    def tf_setup(self):
+    def tf_setup(self, mode):
         # Disable verbose ouput from tensorflow:
         os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' # Disable Tensorflow log from console
         local_device_protos = device_lib.list_local_devices() # Find GPUs
@@ -79,6 +80,11 @@ class DQN():
                 print(dev['device'], '-', dev['name'])
         else:
             print("CAUTION: No available GPUs. Running on CPU.")
+
+        # Set up tensorboard for training logging:
+        if mode == 'train':
+            log_dir = "./logs/"
+            self.tf_summary_writer = tf.summary.create_file_writer(log_dir)
 
     def build_model(self):
 
@@ -143,45 +149,27 @@ class DQN():
         for i in range(self.batch_size):
             targets[i, actions[i]] = rewards[i] + discounted_max_future_reward[i]
 
-        history = self.model.fit(states, targets, verbose = 0)
+        history = self.model.fit(
+            x=states, 
+            y=targets, 
+            verbose=0)
+
+        # Log data to tensorboard:
+        with self.tf_summary_writer.as_default():
+            tf.summary.scalar('loss', history.history['loss'][0], step=self.frame_count)
+            tf.summary.scalar('epsilon', self.epsilon, step=self.frame_count)
+            
+            if self.frame_count % self.eval_freq:
+                score, game_frames, average_Q = self.evaluate()
+                tf.summary.scalar('Score', score, step=self.frame_count)
+                tf.summary.scalar('Game Frames', game_frames, step=self.frame_count)
+                tf.summary.scalar('Average Q', average_Q, step=self.frame_count)
 
         if self.frame_count % self.model_transfer_freq == 0:
             self.model_target.set_weights(self.model.get_weights())
-            self.model.save(f'./saved_models/snake_{self.frame_count}.h5') # Back up progress thus far
+            self.model.save(f'./snake.h5') # Back up progress thus far
 
         return history.history['loss'][0]
-
-    def plot(self, scores, average_Qs, losses, epsilons, display=False):
-        '''
-        Display or save dashboard
-        '''
-        f, axes = plt.subplots(2, 2, sharex=True, figsize=(12,6))
-
-        scores_array = np.array(scores)
-        losses_array = np.array(losses)
-        epsilons_array = np.array(epsilons)
-        average_Qs_array = np.array(average_Qs)
-
-        axes[0, 0].plot(scores_array[:, 0], scores_array[:, 1])
-        axes[1, 0].plot(losses_array[:, 0], losses_array[:, 1])
-        axes[0, 1].plot(epsilons_array[:, 0], epsilons_array[:, 1])
-        axes[1, 1].plot(average_Qs_array[:, 0], average_Qs_array[:, 1])
-        
-        # axes[0, 0].set_ylim([-5, 510])
-        axes[0, 1].set_ylim([0, 1])        
-        axes[0, 0].set_ylabel('Average Evaluation Score')
-        axes[1, 0].set_ylabel('Loss')
-        axes[0, 1].set_ylabel('Epsilon')
-        axes[1, 1].set_ylabel('Average Action Value')
-        axes[1, 1].set_xlabel('Episode')
-        axes[1, 0].set_xlabel('Episode')
-        
-        plt.savefig('progress.jpg', format='jpg')
-        
-        if display:
-            plt.show()
-        else:
-            plt.close() 
 
     def preprocess(self, observation):
         '''
@@ -200,10 +188,10 @@ class DQN():
 
         return output
     
-    def evaluate(self, n_games=10, saved_model=None, render = False, epsilon_eval=0.0, max_steps=100):
+    def evaluate(self, n_episodes=10, saved_model=None, render = False, epsilon_eval=0.0, max_steps=100):
         '''
         inputs:
-        n_games: number of episodes on which to evaluate.
+        n_episodes: number of episodes on which to evaluate.
         saved_model: Use a specific saved model file. If not supplied, use the current class model (self.model).
         render: boolean value to display the evaluation episodes or not
         epsilon_eval: probability of selecting a random action (set as 0.05 to avoid moving in 
@@ -211,7 +199,7 @@ class DQN():
         max_steps: End game after this many steps
 
         returns: score, frames, average_Q
-        score: average game score (sum(score)/n_games)
+        score: average game score (sum(score)/n_episodes)
         frames: Average number of frames for each episode
         average_Q: Average action value for all steps in the game
         '''
@@ -225,7 +213,7 @@ class DQN():
         score = 0
         game_frames = []
 
-        for game in range(n_games):
+        for _ in range(n_episodes):
 
             state = self.preprocess(self.env.reset())
 
@@ -254,7 +242,7 @@ class DQN():
                     step = 0
                     break
             
-        return score/n_games, np.mean(game_frames), np.mean(average_Qs)
+        return score/n_episodes, np.mean(game_frames), np.mean(average_Qs)
 
     def train(self, n_frames=1000000):
 
@@ -263,11 +251,6 @@ class DQN():
         State, action, reward, new state, etc
         '''
 
-        scores = []
-        average_Qs = []
-        steps = []
-        losses = []
-        epsilons = []
         episode = 0
         
         start_time = time.time()
@@ -281,7 +264,6 @@ class DQN():
 
             # Advance the frame count
             self.frame_count += 1
-            episode_loss = []
 
             for _ in range(self.n_steps): # game steps
 
@@ -293,11 +275,7 @@ class DQN():
 
                 state = state_new
 
-                # if self.epsilon <= self.epsilon_min:
-                #     self.env.render()
-
-                loss = self.train_batch()
-                episode_loss.append(loss)
+                self.train_batch()
 
                 self.frame_count += 1
 
@@ -305,30 +283,8 @@ class DQN():
                     training_done = True
 
                 if done:
-
                     episode += 1
-
-                    if episode % self.plot_update_freq == 0:                        
-                        score, game_frames, average_Q = self.evaluate()
-                        scores.append((episode, score))
-                        steps.append((episode, game_frames))
-                        average_Qs.append((episode, average_Q))
-                        epsilons.append((episode, self.epsilon))
-                        losses.append((episode, np.mean(episode_loss)))
-
-                        self.plot(scores, average_Qs, losses, epsilons)
-
                     break
-
-        # Save and plot again at the end of training
-        self.model.save(f'./saved_models/snake_{self.frame_count}.h5') # Back up progress thus far
-        score, game_frames, average_Q = self.evaluate()
-        scores.append((self.frame_count, score))
-        steps.append((self.frame_count, game_frames))
-        average_Qs.append((self.frame_count, average_Q))
-        epsilons.append((self.frame_count, self.epsilon))
-        self.plot(scores, average_Qs, losses, epsilons, display=True)
-        self.evaluate(n_games=10, saved_model=f'./saved_models/snake_{self.frame_count}.h5', render = True)
 
         print(f"Training complete at {datetime.now()}")
         print(f"Total time: {time.time() - start_time}")
@@ -357,17 +313,26 @@ class buffer():
 
 if __name__ == "__main__":
 
-    agent = DQN()
-    
-    # Uncomment to train:
-    # ===================
-    agent.train(n_frames=1000000) # Train for 1 million game frames (6 - 8 hours)
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Run the DQN model with the Snake environment')
+    parser.add_argument('--n_frames', '-n', type=int, help='Number of frames to train on (default 1,000,000)', default=1000000)
+    parser.add_argument('--n_episodes', '-g', type=int, help='Number of episodes to evaluate on (default 10)', default=10)
+    parser.add_argument('--max_steps', '-s', type=int, help='Maximum number of frames in evaluation episodes (default 200)', default=200)
+    parser.add_argument('--epsilon', '-e', type=float, help='Epsilon value for evaluation (default 0.0)', default=0.0)
+    parser.add_argument('--mode', '-m', type=str, help='Mode ("test" or "train")', default='train')
+    parser.add_argument('--model_file', '-f', type=str, help='Tensorflow model file', default=None)
+    parser.add_argument('--render', '-r', type=bool, help='Boolean flag to disable rendering during evaluation', default=True)
+    args = parser.parse_args()
 
-    # Uncomment to evaluate (select correct model to load):
-    # =====================================================
-    # score, game_frames, average_Q = agent.evaluate(
-    #     saved_model='./saved_models/snake.h5', # comment to play with an untrained model
-    #     n_games=10,       # Play 10 episodes
-    #     epsilon_eval=0.0, # No random actions
-    #     max_steps=200,    # Terminate episode after 200 steps (avoid snake getting stuck in loops)
-    #     render = True)    # Render display to monitor
+    # Instantiate agent:
+    agent = DQN(mode=args.mode)
+
+    if args.mode == 'train':
+        agent.train(n_frames=args.n_frames)
+    else:
+        score, game_frames, average_Q = agent.evaluate(
+            saved_model=args.model_file, # comment to play with an untrained model
+            n_episodes=args.n_episodes,       # Play 10 episodes
+            epsilon_eval=args.epsilon, # No random actions
+            max_steps=args.max_steps,    # Terminate episode after 200 steps (avoid snake getting stuck in loops)
+            render = args.render)    # Render display to monitor
