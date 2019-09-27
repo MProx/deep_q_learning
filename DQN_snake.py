@@ -1,16 +1,15 @@
-import argparse
 import numpy as np
-import gym
-import gym_snake
 import tensorflow as tf # v2.0
 from tensorflow.keras.layers import Dense, Lambda, Flatten, Conv2D
 from tensorflow.python.client import device_lib
 import matplotlib.pyplot as plt
-
+import gym
+import gym_snake
 import os
 import time
 from datetime import datetime
 from collections import deque
+import argparse
 
 class DQN():
     def __init__(self, mode):
@@ -22,32 +21,33 @@ class DQN():
         self.env_name = 'snake-v0'
         self.epsilon = 1.0          # Starting epsilon value
         self.epsilon_min = 0.1     # Minimum epsilon value
-        self.epsilon_decay_frames = 1000000 # Amount to subtract each frame
-        self.gamma = 0.9            # Future reward discount factor
-        self.n_steps = 200          # Max steps per game
+        self.epsilon_decay_frames = 1000000 # number of frames to decay linearly from epsilon to epsilon_min
+        self.gamma = 0.9            # Future reward discount factor (Bellman equation)
+        self.n_steps = 200          # Max frames per game before automatic termination (quit endless loops)
         self.memory_size = 1000000  # Replay memory size (number of transitions to store)
         self.d_min = 10000          # Disable training before collecting minimum number of transitions
-        self.eval_freq = 100 # IN episodes
+        self.eval_freq = 100        # Frequency, in episodes, that evaluation data is pushed to tensorboard
 
         # Network parameters:
-        self.learning_rate = 0.001
-        self.conv1filters = 16
+        self.learning_rate = 0.001  # For RMSProp optimizer
+        self.conv1filters = 16      
         self.conv1kernel = (4, 4)
         self.conv1stride = (2, 2)
         self.conv2filters = 32
         self.conv2kernel = (4, 4)
         self.conv2stride = (2, 2)
         self.n_hidden_nodes = 512
-        self.batch_size = 32
+        self.batch_size = 32        # Number of samples in training mini-batch
         self.model_transfer_freq = 10000 # number of frames between transfer of weights from training network to prediction network
+        self.log_dir = "./logs/"    # Directory for tensorboard logs
 
-        # environment details:
+        # Environment details:
         self.grid_height = 10
         self.grid_width = 10
-        self.unit_size = 5  # Number of pixels of each grid point
-        self.unit_gap = 0   # Disable pixels between grid points
-        self.n_snakes = 1   # number of snakes (must be one)
-        self.n_foods = 3    # number of foods (Consider setting higher during training to make positive rewards more likely)
+        self.unit_size = 5          # Number of pixels of each grid point
+        self.unit_gap = 0           # Disable pixels between grid points
+        self.n_snakes = 1           # number of snakes (must be one)
+        self.n_foods = 1            # number of foods (greater than 1 during training to make positive rewards more likely)
 
         self.tf_setup(mode)
         self.env = gym.make(self.env_name)
@@ -83,8 +83,7 @@ class DQN():
 
         # Set up tensorboard for training logging:
         if mode == 'train':
-            log_dir = "./logs/"
-            self.tf_summary_writer = tf.summary.create_file_writer(log_dir)
+            self.tf_summary_writer = tf.summary.create_file_writer(self.log_dir)
 
     def build_model(self):
 
@@ -188,7 +187,7 @@ class DQN():
 
         return output
     
-    def evaluate(self, n_episodes=10, saved_model=None, render = False, epsilon_eval=0.0, max_steps=100):
+    def evaluate(self, n_episodes=10, saved_model=None, render = False, epsilon_eval=0.0, max_steps=100, save=False):
         '''
         inputs:
         n_episodes: number of episodes on which to evaluate.
@@ -202,6 +201,7 @@ class DQN():
         score: average game score (sum(score)/n_episodes)
         frames: Average number of frames for each episode
         average_Q: Average action value for all steps in the game
+        save: string containing save path or None to disable
         '''
 
         if saved_model is None:
@@ -215,7 +215,14 @@ class DQN():
 
         for _ in range(n_episodes):
 
-            state = self.preprocess(self.env.reset())
+            observation = self.env.reset()
+            
+            if save is not None:
+                plt.imshow(observation)
+                plt.savefig(save+'/img0.jpg', dpi=200)
+                plt.close()
+
+            state = self.preprocess(observation)
 
             step = 0
             while True:
@@ -228,6 +235,11 @@ class DQN():
                 else:
                     action = self.env.action_space.sample()
                 observation, reward, done, _ = self.env.step(action)
+                if save is not None:
+                    plt.imshow(observation)
+                    plt.savefig(save + f'/img{step+1}.jpg', dpi=200)
+                    plt.close()
+
 
                 score += reward
                 state = self.preprocess(observation)
@@ -255,6 +267,7 @@ class DQN():
         
         start_time = time.time()
         print(f"Starting training on {n_frames} game frames at {datetime.now()}")
+        print(f'From the terminal, type "tensorboard --logdir {self.log_dir}" to start a TensorBoard server for logging.')
 
         training_done = False
         while not training_done:
