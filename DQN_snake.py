@@ -187,7 +187,7 @@ class DQN():
 
         return output
     
-    def evaluate(self, n_episodes=10, saved_model=None, render = False, epsilon_eval=0.0, max_steps=100, save=False):
+    def evaluate(self, n_episodes=10, saved_model=None, render = False, epsilon_eval=0.0, max_steps=100, save=None):
         '''
         inputs:
         n_episodes: number of episodes on which to evaluate.
