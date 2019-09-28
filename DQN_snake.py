@@ -20,7 +20,7 @@ class DQN():
 
         self.env_name = 'snake-v0'
         self.epsilon = 1.0          # Starting epsilon value
-        self.epsilon_min = 0.1     # Minimum epsilon value
+        self.epsilon_min = 0.1      # Minimum epsilon value
         self.epsilon_decay_frames = 1000000 # number of frames to decay linearly from epsilon to epsilon_min
         self.gamma = 0.9            # Future reward discount factor (Bellman equation)
         self.n_steps = 200          # Max frames per game before automatic termination (quit endless loops)
@@ -47,7 +47,7 @@ class DQN():
         self.unit_size = 5          # Number of pixels of each grid point
         self.unit_gap = 0           # Disable pixels between grid points
         self.n_snakes = 1           # number of snakes (must be one)
-        self.n_foods = 3            # number of foods (greater than 1 during training to make positive rewards more likely)
+        self.n_foods = 3            # number of foods (possibly greater than 1 during training to make positive rewards more likely)
 
         self.tf_setup(mode)
         self.env = gym.make(self.env_name)
@@ -82,8 +82,8 @@ class DQN():
             print("CAUTION: No available GPUs. Running on CPU.")
 
         # Set up tensorboard for training logging:
-        # if mode == 'train':
-        #     self.tf_summary_writer = tf.summary.create_file_writer(self.log_dir)
+        if mode == 'train':
+            self.tf_summary_writer = tf.summary.create_file_writer(self.log_dir)
 
     def build_model(self):
 
@@ -154,16 +154,10 @@ class DQN():
             verbose=0)
 
         # Log data to tensorboard:
-        # with self.tf_summary_writer.as_default():
-        #     tf.summary.scalar('loss', history.history['loss'][0], step=self.frame_count)
-        #     tf.summary.scalar('epsilon', self.epsilon, step=self.frame_count)
+        with self.tf_summary_writer.as_default():
+            tf.summary.scalar('loss', history.history['loss'][0], step=self.frame_count)
+            tf.summary.scalar('epsilon', self.epsilon, step=self.frame_count)
             
-        #     if self.frame_count % self.eval_freq:
-        #         score, game_frames, average_Q = self.evaluate()
-        #         tf.summary.scalar('Score', score, step=self.frame_count)
-        #         tf.summary.scalar('Game Frames', game_frames, step=self.frame_count)
-        #         tf.summary.scalar('Average Q', average_Q, step=self.frame_count)
-
         if self.frame_count % self.model_transfer_freq == 0:
             self.model_target.set_weights(self.model.get_weights())
             self.model.save(f'./snake.h5') # Back up progress thus far
@@ -187,7 +181,7 @@ class DQN():
 
         return output
     
-    def evaluate(self, n_episodes=10, saved_model=None, render = False, epsilon_eval=0.0, max_steps=100, save=None):
+    def evaluate(self, n_episodes=5, saved_model=None, render = False, epsilon_eval=0.0, max_steps=100, save=None):
         '''
         inputs:
         n_episodes: number of episodes on which to evaluate.
@@ -256,38 +250,6 @@ class DQN():
             
         return score/n_episodes, np.mean(game_frames), np.mean(average_Qs)
 
-    def plot(self, scores, average_Qs, losses, epsilons, display=False):
-        '''
-        Display or save dashboard
-        '''
-        f, axes = plt.subplots(2, 2, sharex=True, figsize=(12,6))
-
-        scores_array = np.array(scores)
-        losses_array = np.array(losses)
-        epsilons_array = np.array(epsilons)
-        average_Qs_array = np.array(average_Qs)
-
-        axes[0, 0].plot(scores_array[:, 0], scores_array[:, 1])
-        axes[1, 0].plot(losses_array[:, 0], losses_array[:, 1])
-        axes[0, 1].plot(epsilons_array[:, 0], epsilons_array[:, 1])
-        axes[1, 1].plot(average_Qs_array[:, 0], average_Qs_array[:, 1])
-        
-        # axes[0, 0].set_ylim([-5, 510])
-        axes[0, 1].set_ylim([0, 1])        
-        axes[0, 0].set_ylabel('Average Evaluation Score')
-        axes[1, 0].set_ylabel('Loss')
-        axes[0, 1].set_ylabel('Epsilon')
-        axes[1, 1].set_ylabel('Average Action Value')
-        axes[1, 1].set_xlabel('Episode')
-        axes[1, 0].set_xlabel('Episode')
-        
-        plt.savefig('progress.jpg', format='jpg')
-        
-        if display:
-            plt.show()
-        else:
-            plt.close() 
-
     def train(self, n_frames=1000000):
 
         '''
@@ -295,16 +257,12 @@ class DQN():
         State, action, reward, new state, etc
         '''
 
-        scores = []
-        average_Qs = []
-        steps = []
-        losses = []
-        epsilons = []
-        episode = 0
         
         start_time = time.time()
         print(f"Starting training on {n_frames} game frames at {datetime.now()}")
+        print(f"Use tensorboard to view training stats")
 
+        episode = 0
         training_done = False
         while not training_done:
 
@@ -337,14 +295,14 @@ class DQN():
                 if done:
                     episode += 1
                     if episode % self.eval_freq == 0:
-                        score, game_frames, average_Q = self.evaluate()
-                        scores.append((episode, score))
-                        steps.append((episode, game_frames))
-                        average_Qs.append((episode, average_Q))
-                        epsilons.append((episode, self.epsilon))
-                        losses.append((episode, np.mean(episode_loss)))
 
-                        self.plot(scores, average_Qs, losses, epsilons)
+                        score, game_frames, average_Q = self.evaluate()
+
+                        with self.tf_summary_writer.as_default():
+                            tf.summary.scalar('Score', score, step=episode)
+                            tf.summary.scalar('Game Frames', game_frames, step=episode)
+                            tf.summary.scalar('Average Q', average_Q, step=episode)
+
                     break
 
         print(f"Training complete at {datetime.now()}")
@@ -389,11 +347,11 @@ if __name__ == "__main__":
     agent = DQN(mode=args.mode)
 
     if args.mode == 'train':
-        agent.train(n_frames=args.n_frames)
+        agent.train(n_frames = args.n_frames)
     else:
         score, game_frames, average_Q = agent.evaluate(
-            saved_model=args.model_file, # comment to play with an untrained model
-            n_episodes=args.n_episodes,       # Play 10 episodes
-            epsilon_eval=args.epsilon, # No random actions
-            max_steps=args.max_steps,    # Terminate episode after 200 steps (avoid snake getting stuck in loops)
-            render = args.render)    # Render display to monitor
+            saved_model = args.model_file, # comment to play with an untrained model
+            n_episodes = args.n_episodes,  # Play 10 episodes
+            epsilon_eval = args.epsilon,   # No random actions
+            max_steps = args.max_steps,    # Terminate episode after N steps (avoid snake getting stuck in loops)
+            render  =  args.render)        # Render display to monitor
