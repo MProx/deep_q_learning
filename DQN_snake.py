@@ -8,7 +8,6 @@ import gym_snake
 import os
 import time
 from datetime import datetime
-from collections import deque
 import argparse
 
 class DQN():
@@ -18,18 +17,19 @@ class DQN():
         # Hyperparameters:
         # ===============================
 
-        self.env_name = 'snake-v0'
-        self.epsilon = 1.0          # Starting epsilon value
-        self.epsilon_min = 0.1      # Minimum epsilon value
-        self.epsilon_decay_frames = 1000000 # number of frames to decay linearly from epsilon to epsilon_min
-        self.gamma = 0.9            # Future reward discount factor (Bellman equation)
-        self.n_steps = 200          # Max frames per game before automatic termination (quit endless loops)
-        self.memory_size = 1000000  # Replay memory size (number of transitions to store)
-        self.d_min = 10000          # Disable training before collecting minimum number of transitions
-        self.eval_freq = 100        # Frequency, in episodes, that evaluation data is pushed to tensorboard
+        env_name = 'snake-v0'
+        self.epsilon = 1.0                    # Starting epsilon value
+        self.epsilon_min = 0.1                # Minimum epsilon value
+        self.epsilon_decay_frames = 1000000   # number of frames to decay linearly from epsilon to epsilon_min
+        self.gamma = 0.9                      # Future reward discount factor (Bellman equation)
+        self.n_steps = 200                    # Max frames per game before automatic termination (quit endless loops)
+        self.memory_size = 1000000            # Replay memory size (number of transitions to store)
+        self.d_min = 10000                    # Disable training before collecting minimum number of transitions
+        self.eval_freq = 100                  # Frequency, in episodes, that evaluation data is pushed to tensorboard
+        self.img_stack_count = 1              # Number of images to stack in each input state
 
         # Network parameters:
-        self.learning_rate = 0.001  # For RMSProp optimizer
+        self.learning_rate = 0.001            # For RMSProp optimizer
         self.conv1filters = 16      
         self.conv1kernel = (4, 4)
         self.conv1stride = (2, 2)
@@ -37,20 +37,20 @@ class DQN():
         self.conv2kernel = (4, 4)
         self.conv2stride = (2, 2)
         self.n_hidden_nodes = 512
-        self.batch_size = 32        # Number of samples in training mini-batch
-        self.model_transfer_freq = 10000 # number of frames between transfer of weights from training network to prediction network
-        self.log_dir = "./logs/"    # Directory for tensorboard logs
+        self.batch_size = 32                  # Number of samples in training mini-batch
+        self.model_transfer_freq = 10000      # number of frames between transfer of weights from training network to prediction network
+        self.log_dir = "./logs/"              # Directory for tensorboard logs
 
         # Environment details:
         self.grid_height = 10
         self.grid_width = 10
-        self.unit_size = 5          # Number of pixels of each grid point
-        self.unit_gap = 0           # Disable pixels between grid points
-        self.n_snakes = 1           # number of snakes (must be one)
-        self.n_foods = 3            # number of foods (possibly greater than 1 during training to make positive rewards more likely)
+        self.unit_size = 5                    # Number of pixels of each grid point
+        self.unit_gap = 0                     # Disable pixels between grid points
+        self.n_snakes = 1                     # number of snakes (must be one)
+        self.n_foods = 1                      # number of foods (possibly greater than 1 during training to make positive rewards more likely)
 
         self.tf_setup(mode)
-        self.env = gym.make(self.env_name)
+        self.env = gym.make(env_name)
         self.env.unit_size = self.unit_size
         self.env.unit_gap = self.unit_gap
         self.env.n_snakes = self.n_snakes
@@ -62,7 +62,10 @@ class DQN():
         self.n_actions = self.env.action_space.n
         self.model_target, self.model = self.build_model()
         self.frame_count = 0
-        self.memory = buffer(maxlen=self.memory_size)
+        self.memory = buffer(
+            maxlen=self.memory_size, 
+            state_img_width=self.observations_shape[0],
+            state_img_height=self.observations_shape[1])
 
     def tf_setup(self, mode):
         # Disable verbose ouput from tensorflow:
@@ -83,11 +86,11 @@ class DQN():
 
         # Set up tensorboard for training logging:
         if mode == 'train':
-            self.tf_summary_writer = tf.summary.create_file_writer(self.log_dir)
+            self.tf_summary_writer = tf.summary.create_file_writer(self.log_dir+f'/{datetime.now()}/')
 
     def build_model(self):
 
-        Inputs = tf.keras.Input(shape=(self.observations_shape[0], self.observations_shape[1], 1))
+        Inputs = tf.keras.Input(shape=(self.observations_shape[0], self.observations_shape[1], self.img_stack_count))
         Normalize = Lambda(lambda x: x/255)(Inputs)
         x = Conv2D(
             filters=self.conv1filters, 
@@ -127,6 +130,7 @@ class DQN():
         # Choose action based on Epsilon
         if np.random.uniform() > self.epsilon:
             input = np.expand_dims(state, axis = 0)
+            input = np.expand_dims(input, axis = 3)
             return int(np.argmax(self.model.predict(input)))
         else:
             return np.random.randint(0, self.n_actions)
@@ -138,7 +142,7 @@ class DQN():
             return 0 
 
         # Extract minibatch:
-        states, actions, rewards, states_new, terminals = self.memory.sample(1, self.batch_size)
+        states, actions, rewards, states_new, terminals = self.memory.sample(self.img_stack_count, self.batch_size)
 
         # Calculate discounted future reward
         discounted_max_future_reward = self.gamma * np.max(self.model_target.predict(states_new), axis = 1)
@@ -148,21 +152,15 @@ class DQN():
         for i in range(self.batch_size):
             targets[i, actions[i]] = rewards[i] + discounted_max_future_reward[i]
 
-        history = self.model.fit(
-            x=states, 
-            y=targets, 
-            verbose=0)
+        history = self.model.fit(x=states, y=targets, verbose=0)
 
         # Log data to tensorboard:
         with self.tf_summary_writer.as_default():
             tf.summary.scalar('loss', history.history['loss'][0], step=self.frame_count)
-            tf.summary.scalar('epsilon', self.epsilon, step=self.frame_count)
             
         if self.frame_count % self.model_transfer_freq == 0:
             self.model_target.set_weights(self.model.get_weights())
             self.model.save(f'./snake.h5') # Back up progress thus far
-
-        return history.history['loss'][0]
 
     def preprocess(self, observation):
         '''
@@ -176,7 +174,6 @@ class DQN():
         snake[snake == 245] = 200           # Change head value to make it distinct
         snake[np.where(food > 0)] = 0       # Remove food in snake layer
         output = snake*1 + food*0.5         # Compile layers into one, but make snake and food distinct values
-        output = np.expand_dims(output, 2)  # Expand dims to match what the network expects
         output = output.astype(np.uint8)    # Save as byte dtype to save memory
 
         return output
@@ -223,6 +220,7 @@ class DQN():
 
                 if np.random.uniform() > epsilon_eval:
                     input = np.expand_dims(state, axis = 0)
+                    input = np.expand_dims(input, axis = 3)
                     Qs = play_model.predict(input)
                     average_Qs.append(np.mean(Qs))
                     action = int(np.argmax(Qs))
@@ -255,9 +253,11 @@ class DQN():
         '''
         Main training function. This is the part that enacts and observes the markov chain:
         State, action, reward, new state, etc
+
+        Arguments:
+        n_frames: number of frames to train on (default: 1,000,000)
         '''
 
-        
         start_time = time.time()
         print(f"Starting training on {n_frames} game frames at {datetime.now()}")
         print(f"Use tensorboard to view training stats")
@@ -266,13 +266,16 @@ class DQN():
         training_done = False
         while not training_done:
 
-
             # Get first state
             state = self.preprocess(self.env.reset())
 
+            # Add start frames to memory:
+            for _ in range(self.img_stack_count):
+                # Set valid to false to prevent training on these frames:
+                self.memory.remember(0, 0, state, False, train=False)
+
             # Advance the frame count
             self.frame_count += 1
-            episode_loss = []
 
             for _ in range(self.n_steps): # game steps
 
@@ -280,12 +283,10 @@ class DQN():
                 observation, reward, done, _ = self.env.step(action)
                 state_new = self.preprocess(observation)
 
-                self.memory.remember(state, action, reward, state_new, done)
-
+                self.memory.remember(action, reward, state_new, done)
                 state = state_new
 
-                loss = self.train_batch()
-                episode_loss.append(loss)
+                self.train_batch()
 
                 self.frame_count += 1
 
@@ -293,6 +294,7 @@ class DQN():
                     training_done = True
 
                 if done:
+
                     episode += 1
                     if episode % self.eval_freq == 0:
 
@@ -302,31 +304,60 @@ class DQN():
                             tf.summary.scalar('Score', score, step=episode)
                             tf.summary.scalar('Game Frames', game_frames, step=episode)
                             tf.summary.scalar('Average Q', average_Q, step=episode)
+                            tf.summary.scalar('epsilon', self.epsilon, step=self.frame_count)
 
                     break
 
         print(f"Training complete at {datetime.now()}")
-        print(f"Total time: {time.time() - start_time}")
+        print(f"Total time: {round((time.time() - start_time)/3600, 2)} hours")
 
 class buffer():
-    def __init__(self, maxlen):
-        self.memory = deque(maxlen=maxlen)
-        self.state_memory = deque(maxlen=maxlen)
+    '''
+    Ths class implements a circular buffer system, but also allows that the state only be stored once and indexed. I.e. the state 
+    doesn't need to be stored separately as the starting frame of one transition and the resultant frame of another.
 
-    def remember(self, state, action, reward, state_, done):
-        self.memory.append([state, action, reward, state_, done])
+    The current memory position is stored in the variable memory_counter, and when memory_counter exceeds maxlen, it is reset to zero.
+    '''
+    def __init__(self, maxlen, state_img_width, state_img_height):
+        self.state_memory = np.zeros(shape=(state_img_width, state_img_height, maxlen), dtype=np.uint8)
+        self.action_memory = np.zeros(shape=maxlen, dtype = np.uint8)
+        self.reward_memory = np.zeros(shape=maxlen, dtype = np.int8) # unsigned - could be negative
+        self.done_memory = np.zeros(shape=maxlen, dtype=bool)   
+        self.train_memory = np.zeros(shape=maxlen, dtype=bool)
+        self.memory_counter = 0
+        self.maxlen = maxlen
+
+    def remember(self, action, reward, state, done, train=True):
+        '''
+        Arguments:
+        action, reward, state, done: training inputs for a transition (use only final state)
+        train: flag to indicate whether the transition is valid for training. The first transition (or transitions if
+            frame stacking is performed) will include transitions from the previous episode, and as such should not be 
+            used for training
+        '''
+        self.action_memory[self.memory_counter] = action
+        self.reward_memory[self.memory_counter] = reward
+        self.state_memory[:, :, self.memory_counter] = state
+        self.done_memory[self.memory_counter] = done
+        self.train_memory[self.memory_counter] = train
+
+        # Advance memory counter and return to the beginning if buffer overflows
+        self.memory_counter = (self.memory_counter + 1) % self.maxlen
 
     def sample(self, stack_size, batch_size):
         
         # Extract
-        indices = np.random.randint(low = stack_size, high = len(self.memory), size = batch_size)
-        minibatch = [self.memory[i] for i in indices]
-        transitions = list(zip(*minibatch))
-        states      = np.stack(transitions[0], axis=0)
-        actions     = np.stack(transitions[1], axis=0)
-        rewards     = np.stack(transitions[2], axis=0)
-        terminals   = np.stack(transitions[4], axis=0)
-        states_new  = np.stack(transitions[3], axis=0)
+        valid_indices = np.where(self.train_memory[stack_size:] == True)[0]
+        indices = np.random.choice(valid_indices, size=batch_size, replace=False)
+
+        states = np.stack([self.state_memory[:, :, x - 1] for x in indices], axis = 0) # state_memory stores resultant state, so subtract 1 from index to get starting frame
+        states_new = np.stack([self.state_memory[:, :, x] for x in indices], axis = 0)
+        actions = self.action_memory[indices]
+        rewards = self.reward_memory[indices]
+        terminals = self.done_memory[indices]
+        
+        states = np.expand_dims(states, axis=3)
+        states_new = np.expand_dims(states_new, axis=3)
 
         return states, actions, rewards, states_new, terminals
 
@@ -334,13 +365,13 @@ if __name__ == "__main__":
 
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Run the DQN model with the Snake environment')
-    parser.add_argument('--n_frames', '-n', type=int, help='Number of frames to train on (default 1,000,000)', default=1000000)
-    parser.add_argument('--n_episodes', '-g', type=int, help='Number of episodes to evaluate on (default 10)', default=10)
-    parser.add_argument('--max_steps', '-s', type=int, help='Maximum number of frames in evaluation episodes (default 200)', default=200)
-    parser.add_argument('--epsilon', '-e', type=float, help='Epsilon value for evaluation (default 0.0)', default=0.0)
-    parser.add_argument('--mode', '-m', type=str, help='Mode ("test" or "train")', default='train')
-    parser.add_argument('--model_file', '-f', type=str, help='Tensorflow model file', default=None)
-    parser.add_argument('--render', '-r', type=bool, help='Boolean flag to disable rendering during evaluation', default=True)
+    parser.add_argument('--n_frames', '-n', type=int, help='Number of frames to train on (default: 1,000,000)', default=1000000)
+    parser.add_argument('--n_episodes', '-g', type=int, help='Number of episodes to evaluate on (default: 10)', default=10)
+    parser.add_argument('--max_steps', '-s', type=int, help='Maximum number of frames in evaluation episodes (default: 200)', default=200)
+    parser.add_argument('--epsilon', '-e', type=float, help='Epsilon value for evaluation (default: 0.0)', default=0.0)
+    parser.add_argument('--mode', '-m', type=str, help='Mode: "test" or "train" (default: "train")', default='train')
+    parser.add_argument('--model_file', '-f', type=str, help='Path to tensorflow model file (default: use untrained model)', default=None)
+    parser.add_argument('--render', '-r', type=bool, help='Boolean flag to disable rendering during evaluation (default: True)', default=True)
     args = parser.parse_args()
 
     # Instantiate agent:

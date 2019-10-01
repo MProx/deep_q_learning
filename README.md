@@ -48,7 +48,7 @@ To edit hyperparameters, change the class variables in thier definition near the
 
 ## TO DO:
 
-- The current model works, but it quite inefficient with memory. Each state (int8 array) is stored twice - once as the resulting state of one transition, and then again as the starting state of the next. I would like to implement a circular buffer system with indexing to allow storing of each frame only once. However, this presents complications around how to handle what happens when an episode ends - you dont want the last frame of the previous episode to be included as the starting frame for a new episode.
+- Possible memory leaks: the current system seems to occupy much more RAM than it theoretically should. A full audit of the memory usage must be performed.
 
 - Possibly move all hyperparameters to a separate file, save in JSON format
 
