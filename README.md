@@ -28,7 +28,7 @@ Clone this repository. From the command like, execute the following to see all f
 
 > $ python DQN_snake.py --help
 
-To train the model with default parameters (default of 1,000,000 frames, 6 - 8 hours on my laptop), use the '-m'
+To train the model with default parameters (default of 1,000,000 frames), use the '-m'
 
 > $ python DQN_snake.py -m train
 
@@ -45,6 +45,12 @@ To supply a trained model file for evaluation, use the '-f' flag:
 > $ python DQN_snake.py -m test -f snake.h5
 
 To edit hyperparameters, change the class variables in thier definition near the top of the DQN_snake.py file.
+
+Once the model is running, open a terminal or command prompt and start tensorboard with the following command:
+
+> $ tensorboard --logdir ./logs/
+
+Then open a browser window and navigate to localhost:6006/ to see stats and training progress.
 
 ## TO DO:
 
