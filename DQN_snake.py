@@ -11,7 +11,7 @@ from datetime import datetime
 import argparse
 
 class DQN():
-    def __init__(self, mode):
+    def __init__(self, mode, frames):
 
         # ===============================
         # Hyperparameters:
@@ -23,7 +23,7 @@ class DQN():
         self.epsilon_decay_frames = 1000000   # number of frames to decay linearly from epsilon to epsilon_min
         self.gamma = 0.9                      # Future reward discount factor (Bellman equation)
         self.n_steps = 200                    # Max frames per game before automatic termination (quit endless loops)
-        self.memory_size = 1000000            # Replay memory size (number of transitions to store)
+        self.max_memory_size = 1000000        # Replay memory size (number of transitions to store)
         self.d_min = 10000                    # Disable training before collecting minimum number of transitions
         self.eval_freq = 100                  # Frequency, in episodes, that evaluation data is pushed to tensorboard
         self.img_stack_count = 1              # Number of images to stack in each input state
@@ -62,10 +62,14 @@ class DQN():
         self.n_actions = self.env.action_space.n
         self.model_target, self.model = self.build_model()
         self.frame_count = 0
-        self.memory = buffer(
-            maxlen=self.memory_size, 
-            state_img_width=self.observations_shape[0],
-            state_img_height=self.observations_shape[1])
+
+        # Only create large training memory structures if in training mode:
+        if mode == 'train':
+            self.memory_size = min(args.n_frames, self.max_memory_size)
+            self.memory = buffer(
+                maxlen=self.memory_size, 
+                state_img_width=self.observations_shape[0],
+                state_img_height=self.observations_shape[1])
 
     def tf_setup(self, mode):
         # Disable verbose ouput from tensorflow:
@@ -118,20 +122,20 @@ class DQN():
         
         model_predict.set_weights(model_train.get_weights())
         
-        model_predict.summary()
+        # model_predict.summary()
         return model_train, model_predict
 
     def choose_action(self, state):
 
         # Update epsilon if necessary
         if (self.frame_count > self.d_min) and (self.epsilon > self.epsilon_min):
-            self.epsilon -= max(0, self.epsilon_decay_value)
+            self.epsilon -= self.epsilon_decay_value
 
         # Choose action based on Epsilon
         if np.random.uniform() > self.epsilon:
             input = np.expand_dims(state, axis = 0)
             input = np.expand_dims(input, axis = 3)
-            return int(np.argmax(self.model.predict(input)))
+            return int(np.argmax(self.model.predict_on_batch(input)))
         else:
             return np.random.randint(0, self.n_actions)
 
@@ -145,22 +149,21 @@ class DQN():
         states, actions, rewards, states_new, terminals = self.memory.sample(self.img_stack_count, self.batch_size)
 
         # Calculate discounted future reward
-        discounted_max_future_reward = self.gamma * np.max(self.model_target.predict(states_new), axis = 1)
+        discounted_max_future_reward = self.gamma * np.max(self.model_target.predict_on_batch(states_new), axis = 1)
         discounted_max_future_reward[np.where(terminals == True)] = 0 # terminal states have no future reward
 
-        targets = self.model.predict(states)
+        targets = np.array(self.model.predict_on_batch(states))
+
         for i in range(self.batch_size):
             targets[i, actions[i]] = rewards[i] + discounted_max_future_reward[i]
 
-        history = self.model.fit(x=states, y=targets, verbose=0)
-
-        # Log data to tensorboard:
-        with self.tf_summary_writer.as_default():
-            tf.summary.scalar('loss', history.history['loss'][0], step=self.frame_count)
+        loss = self.model.train_on_batch(x=states, y=targets) # Dont use model.fit() - causes severe memory leaks
             
         if self.frame_count % self.model_transfer_freq == 0:
             self.model_target.set_weights(self.model.get_weights())
             self.model.save(f'./snake.h5') # Back up progress thus far
+
+        return loss
 
     def preprocess(self, observation):
         '''
@@ -221,7 +224,7 @@ class DQN():
                 if np.random.uniform() > epsilon_eval:
                     input = np.expand_dims(state, axis = 0)
                     input = np.expand_dims(input, axis = 3)
-                    Qs = play_model.predict(input)
+                    Qs = np.array(play_model.predict_on_batch(input))
                     average_Qs.append(np.mean(Qs))
                     action = int(np.argmax(Qs))
                 else:
@@ -231,7 +234,6 @@ class DQN():
                     plt.imshow(observation)
                     plt.savefig(save + f'/img{step+1}.jpg', dpi=200)
                     plt.close()
-
 
                 score += reward
                 state = self.preprocess(observation)
@@ -286,7 +288,7 @@ class DQN():
                 self.memory.remember(action, reward, state_new, done)
                 state = state_new
 
-                self.train_batch()
+                loss = self.train_batch()
 
                 self.frame_count += 1
 
@@ -305,6 +307,7 @@ class DQN():
                             tf.summary.scalar('Game Frames', game_frames, step=episode)
                             tf.summary.scalar('Average Q', average_Q, step=episode)
                             tf.summary.scalar('epsilon', self.epsilon, step=self.frame_count)
+                            tf.summary.scalar('Loss', loss, step=self.frame_count)
 
                     break
 
@@ -322,8 +325,8 @@ class buffer():
         self.state_memory = np.zeros(shape=(state_img_width, state_img_height, maxlen), dtype=np.uint8)
         self.action_memory = np.zeros(shape=maxlen, dtype = np.uint8)
         self.reward_memory = np.zeros(shape=maxlen, dtype = np.int8) # unsigned - could be negative
-        self.done_memory = np.zeros(shape=maxlen, dtype=bool)   
-        self.train_memory = np.zeros(shape=maxlen, dtype=bool)
+        self.done_memory = np.zeros(shape=maxlen, dtype=np.bool_)   
+        self.train_memory = np.zeros(shape=maxlen, dtype=np.bool_)
         self.memory_counter = 0
         self.maxlen = maxlen
 
@@ -346,8 +349,11 @@ class buffer():
 
     def sample(self, stack_size, batch_size):
         
-        # Extract
-        valid_indices = np.where(self.train_memory[stack_size:] == True)[0]
+        # Extract:
+        # Only select from stack_size onwards because there must always be previous frames
+        # Also, only select where train_memory flag is True (avoid training where start and end frame(s)
+        # are from different episodes)
+        valid_indices = np.where(self.train_memory[stack_size:] == True)[0] 
         indices = np.random.choice(valid_indices, size=batch_size, replace=False)
 
         states = np.stack([self.state_memory[:, :, x - 1] for x in indices], axis = 0) # state_memory stores resultant state, so subtract 1 from index to get starting frame
@@ -375,7 +381,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Instantiate agent:
-    agent = DQN(mode=args.mode)
+    agent = DQN(mode=args.mode, frames=args.n_frames)
 
     if args.mode == 'train':
         agent.train(n_frames = args.n_frames)
