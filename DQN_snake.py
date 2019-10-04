@@ -387,8 +387,8 @@ if __name__ == "__main__":
         agent.train(n_frames = args.n_frames)
     else:
         score, game_frames, average_Q = agent.evaluate(
-            saved_model = args.model_file, # comment to play with an untrained model
-            n_episodes = args.n_episodes,  # Play 10 episodes
-            epsilon_eval = args.epsilon,   # No random actions
-            max_steps = args.max_steps,    # Terminate episode after N steps (avoid snake getting stuck in loops)
-            render  =  args.render)        # Render display to monitor
+            saved_model = args.model_file,
+            n_episodes = args.n_episodes,
+            epsilon_eval = args.epsilon,
+            max_steps = args.max_steps,
+            render  =  args.render)
