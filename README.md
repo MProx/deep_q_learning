@@ -54,8 +54,6 @@ Then open a browser window and navigate to localhost:6006/ to see stats and trai
 
 ## TO DO:
 
-- Possible memory leaks: the current system seems to occupy much more RAM than it theoretically should. A full audit of the memory usage must be performed.
-
 - Possibly move all hyperparameters to a separate file, save in JSON format
 
 - Improve the model to use Double-DQN, Dueling DQN, etc.

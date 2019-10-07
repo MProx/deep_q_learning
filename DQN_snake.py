@@ -11,7 +11,7 @@ from datetime import datetime
 import argparse
 
 class DQN():
-    def __init__(self, mode, frames):
+    def __init__(self, mode, frames, file):
 
         # ===============================
         # Hyperparameters:
@@ -37,7 +37,7 @@ class DQN():
         self.conv2kernel = (4, 4)
         self.conv2stride = (2, 2)
         self.n_hidden_nodes = 512
-        self.batch_size = 32                  # Number of samples in training mini-batch
+        self.batch_size = 512                 # Number of samples in training mini-batch
         self.model_transfer_freq = 10000      # number of frames between transfer of weights from training network to prediction network
         self.log_dir = "./logs/"              # Directory for tensorboard logs
 
@@ -60,7 +60,7 @@ class DQN():
         self.epsilon_decay_value = (self.epsilon - self.epsilon_min)/self.epsilon_decay_frames
         self.observations_shape = self.env.reset().shape
         self.n_actions = self.env.action_space.n
-        self.model_target, self.model = self.build_model()
+        self.model_target, self.model = self.build_model(file)
         self.frame_count = 0
 
         # Only create large training memory structures if in training mode:
@@ -92,38 +92,46 @@ class DQN():
         if mode == 'train':
             self.tf_summary_writer = tf.summary.create_file_writer(self.log_dir+f'/{datetime.now()}/')
 
-    def build_model(self):
+    def build_model(self, file):
 
-        Inputs = tf.keras.Input(shape=(self.observations_shape[0], self.observations_shape[1], self.img_stack_count))
-        Normalize = Lambda(lambda x: x/255)(Inputs)
-        x = Conv2D(
-            filters=self.conv1filters, 
-            kernel_size=self.conv1kernel, 
-            strides=self.conv1stride,
-            padding='valid',
-            activation='relu')(Normalize)
-        x = Conv2D(
-            filters=self.conv2filters, 
-            kernel_size=self.conv2kernel, 
-            strides=self.conv2stride,
-            padding='valid',
-            activation='relu')(x)
-        x = Flatten()(x)
-        x = Dense(self.n_hidden_nodes, activation="tanh")(x)
-        Output = Dense(self.n_actions, activation="linear")(x)
-        
-        optimizer=tf.optimizers.RMSprop(learning_rate=self.learning_rate) # use default valules
+        if file is not None:
+            # If file is specified, load it:
+            model_train = tf.keras.models.load_model(file)
+            model_predict = tf.keras.models.load_model(file)
+            return model_train, model_predict
 
-        model_train = tf.keras.Model(inputs=Inputs, outputs=Output)
-        model_predict = tf.keras.Model(inputs=Inputs, outputs=Output)
+        else:
+            # If no model file is specified, build a new one:            
+            Inputs = tf.keras.Input(shape=(self.observations_shape[0], self.observations_shape[1], self.img_stack_count))
+            Normalize = Lambda(lambda x: x/255)(Inputs)
+            x = Conv2D(
+                filters=self.conv1filters, 
+                kernel_size=self.conv1kernel, 
+                strides=self.conv1stride,
+                padding='valid',
+                activation='relu')(Normalize)
+            x = Conv2D(
+                filters=self.conv2filters, 
+                kernel_size=self.conv2kernel, 
+                strides=self.conv2stride,
+                padding='valid',
+                activation='relu')(x)
+            x = Flatten()(x)
+            x = Dense(self.n_hidden_nodes, activation="tanh")(x)
+            Output = Dense(self.n_actions, activation="linear")(x)
+            
+            optimizer=tf.optimizers.RMSprop(learning_rate=self.learning_rate) # use default valules
 
-        model_train.compile(optimizer, loss=tf.keras.losses.Huber())        
-        model_predict.compile(optimizer, loss=tf.keras.losses.Huber())
-        
-        model_predict.set_weights(model_train.get_weights())
-        
-        # model_predict.summary()
-        return model_train, model_predict
+            model_train = tf.keras.Model(inputs=Inputs, outputs=Output)
+            model_predict = tf.keras.Model(inputs=Inputs, outputs=Output)
+
+            model_train.compile(optimizer, loss=tf.keras.losses.Huber())        
+            model_predict.compile(optimizer, loss=tf.keras.losses.Huber())
+            
+            model_predict.set_weights(model_train.get_weights())
+            
+            # model_predict.summary()
+            return model_train, model_predict
 
     def choose_action(self, state):
 
@@ -381,7 +389,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Instantiate agent:
-    agent = DQN(mode=args.mode, frames=args.n_frames)
+    agent = DQN(mode=args.mode, frames=args.n_frames, file=args.model_file)
 
     if args.mode == 'train':
         agent.train(n_frames = args.n_frames)
