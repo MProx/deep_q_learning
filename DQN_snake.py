@@ -10,8 +10,11 @@ import time
 from datetime import datetime
 import argparse
 
+import cProfile
+import pstats
+
 class DQN():
-    def __init__(self, mode, frames, file):
+    def __init__(self, mode, file):
 
         # ===============================
         # Hyperparameters:
@@ -22,7 +25,6 @@ class DQN():
         self.epsilon_min = 0.1                # Minimum epsilon value
         self.epsilon_decay_frames = 1000000   # number of frames to decay linearly from epsilon to epsilon_min
         self.gamma = 0.9                      # Future reward discount factor (Bellman equation)
-        self.n_steps = 200                    # Max frames per game before automatic termination (quit endless loops)
         self.max_memory_size = 1000000        # Replay memory size (number of transitions to store)
         self.d_min = 10000                    # Disable training before collecting minimum number of transitions
         self.eval_freq = 100                  # Frequency, in episodes, that evaluation data is pushed to tensorboard
@@ -31,15 +33,15 @@ class DQN():
         # Network parameters:
         self.learning_rate = 0.001            # For RMSProp optimizer
         self.conv1filters = 16      
-        self.conv1kernel = (4, 4)
-        self.conv1stride = (2, 2)
+        self.conv1kernel = (8, 8)
+        self.conv1stride = (1, 1)
         self.conv2filters = 32
         self.conv2kernel = (4, 4)
-        self.conv2stride = (2, 2)
+        self.conv2stride = (1, 1)
         self.n_hidden_nodes = 512
-        self.batch_size = 512                 # Number of samples in training mini-batch
-        self.model_transfer_freq = 10000      # number of frames between transfer of weights from training network to prediction network
-        self.log_dir = "./logs/"              # Directory for tensorboard logs
+        self.batch_size = 32                 # Number of samples in training mini-batch
+        self.model_transfer_freq = 10000     # number of frames between transfer of weights from training network to prediction network
+        self.log_dir = "./logs"              # Directory for tensorboard logs
 
         # Environment details:
         self.grid_height = 10
@@ -74,17 +76,11 @@ class DQN():
     def tf_setup(self, mode):
         # Disable verbose ouput from tensorflow:
         os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' # Disable Tensorflow log from console
-        local_device_protos = device_lib.list_local_devices() # Find GPUs
-        GPU_list = [x.physical_device_desc \
-                    for x in local_device_protos \
-                    if x.device_type == 'GPU']
-        if len(GPU_list) > 0:
-            print("Available GPUs:")
-            for i in GPU_list:
-                # parse GPU descriptions into dict:
-                dev = {y.split(':')[0].strip():y.split(':')[1].strip() for y in [x.strip() for x in i.split(",")]}
-                # print only the parts we want:
-                print(dev['device'], '-', dev['name'])
+
+        GPU_name = tf.test.gpu_device_name()
+    
+        if len(GPU_name) > 0:
+            print(f"Available GPUs: {GPU_name}")
         else:
             print("CAUTION: No available GPUs. Running on CPU.")
 
@@ -130,7 +126,7 @@ class DQN():
             
             model_predict.set_weights(model_train.get_weights())
             
-            # model_predict.summary()
+            model_predict.summary()
             return model_train, model_predict
 
     def choose_action(self, state):
@@ -153,17 +149,16 @@ class DQN():
         if self.frame_count < self.d_min:
             return 0 
 
-        # Extract minibatch:
         states, actions, rewards, states_new, terminals = self.memory.sample(self.img_stack_count, self.batch_size)
 
-        # Calculate discounted future reward
         discounted_max_future_reward = self.gamma * np.max(self.model_target.predict_on_batch(states_new), axis = 1)
         discounted_max_future_reward[np.where(terminals == True)] = 0 # terminal states have no future reward
 
+        # Start with all targets for all actions being same as initial predicted value
         targets = np.array(self.model.predict_on_batch(states))
 
-        for i in range(self.batch_size):
-            targets[i, actions[i]] = rewards[i] + discounted_max_future_reward[i]
+        # Correct the Q values for target actions we actually observed:
+        targets[np.arange(self.batch_size), actions.astype(int)] = rewards + discounted_max_future_reward
 
         loss = self.model.train_on_batch(x=states, y=targets) # Dont use model.fit() - causes severe memory leaks
             
@@ -189,7 +184,7 @@ class DQN():
 
         return output
     
-    def evaluate(self, n_episodes=5, saved_model=None, render = False, epsilon_eval=0.0, max_steps=100, save=None):
+    def evaluate(self, n_episodes=5, saved_model=None, render = False, epsilon_eval=0.0, save=None):
         '''
         inputs:
         n_episodes: number of episodes on which to evaluate.
@@ -197,7 +192,6 @@ class DQN():
         render: boolean value to display the evaluation episodes or not
         epsilon_eval: probability of selecting a random action (set as 0.05 to avoid moving in 
             loops in partially-trained models)
-        max_steps: End game after this many steps
 
         returns: score, frames, average_Q
         score: average game score (sum(score)/n_episodes)
@@ -226,8 +220,7 @@ class DQN():
 
             state = self.preprocess(observation)
 
-            step = 0
-            while True:
+            for step in range(args.max_steps): # game steps
 
                 if np.random.uniform() > epsilon_eval:
                     input = np.expand_dims(state, axis = 0)
@@ -237,7 +230,9 @@ class DQN():
                     action = int(np.argmax(Qs))
                 else:
                     action = self.env.action_space.sample()
+
                 observation, reward, done, _ = self.env.step(action)
+
                 if save is not None:
                     plt.imshow(observation)
                     plt.savefig(save + f'/img{step+1}.jpg', dpi=200)
@@ -251,29 +246,32 @@ class DQN():
 
                 step += 1
 
-                if done or (step > max_steps):
+                if done or (step == args.max_steps - 1):
                     game_frames.append(step)
-                    step = 0
                     break
-            
+
         return score/n_episodes, np.mean(game_frames), np.mean(average_Qs)
 
-    def train(self, n_frames=1000000):
+    def train(self):
 
         '''
         Main training function. This is the part that enacts and observes the markov chain:
         State, action, reward, new state, etc
-
-        Arguments:
-        n_frames: number of frames to train on (default: 1,000,000)
         '''
 
         start_time = time.time()
-        print(f"Starting training on {n_frames} game frames at {datetime.now()}")
-        print(f"Use tensorboard to view training stats")
+        print(f"Starting training on {args.n_frames} game frames at {datetime.now()}")
+        print(f"Max frames per episode: {args.max_steps}")        
+        print(f"\nUse tensorboard to view training stats")
+        print(f"Keep this window open, and open a new terminal or command prompt.")
+        print(f"Type the following command:")
+        print(f"\ttensorboard --logdir ./logs/")
+        print(f"Then open a browser window and navigate to http://localhost:6006/")
+        
 
         episode = 0
         training_done = False
+            
         while not training_done:
 
             # Get first state
@@ -287,7 +285,7 @@ class DQN():
             # Advance the frame count
             self.frame_count += 1
 
-            for _ in range(self.n_steps): # game steps
+            for step in range(args.max_steps): # game steps
 
                 action = self.choose_action(state)
                 observation, reward, done, _ = self.env.step(action)
@@ -300,13 +298,14 @@ class DQN():
 
                 self.frame_count += 1
 
-                if self.frame_count >= (n_frames+self.d_min):
+                if self.frame_count >= (self.d_min + args.n_frames):
                     training_done = True
 
-                if done:
+                if done or step == args.max_steps - 1:
 
                     episode += 1
-                    if episode % self.eval_freq == 0:
+
+                    if self.frame_count >= (self.d_min) and episode % self.eval_freq == 0:
 
                         score, game_frames, average_Q = self.evaluate()
 
@@ -330,7 +329,7 @@ class buffer():
     The current memory position is stored in the variable memory_counter, and when memory_counter exceeds maxlen, it is reset to zero.
     '''
     def __init__(self, maxlen, state_img_width, state_img_height):
-        self.state_memory = np.zeros(shape=(state_img_width, state_img_height, maxlen), dtype=np.uint8)
+        self.state_memory = np.zeros(shape=(maxlen, state_img_width, state_img_height), dtype=np.uint8)
         self.action_memory = np.zeros(shape=maxlen, dtype = np.uint8)
         self.reward_memory = np.zeros(shape=maxlen, dtype = np.int8) # unsigned - could be negative
         self.done_memory = np.zeros(shape=maxlen, dtype=np.bool_)   
@@ -348,7 +347,7 @@ class buffer():
         '''
         self.action_memory[self.memory_counter] = action
         self.reward_memory[self.memory_counter] = reward
-        self.state_memory[:, :, self.memory_counter] = state
+        self.state_memory[self.memory_counter, :, :] = state
         self.done_memory[self.memory_counter] = done
         self.train_memory[self.memory_counter] = train
 
@@ -364,8 +363,8 @@ class buffer():
         valid_indices = np.where(self.train_memory[stack_size:] == True)[0] 
         indices = np.random.choice(valid_indices, size=batch_size, replace=False)
 
-        states = np.stack([self.state_memory[:, :, x - 1] for x in indices], axis = 0) # state_memory stores resultant state, so subtract 1 from index to get starting frame
-        states_new = np.stack([self.state_memory[:, :, x] for x in indices], axis = 0)
+        states = self.state_memory[indices - 1, :, :] # state_memory stores resultant state, so subtract 1 from index to get starting frame
+        states_new = self.state_memory[indices, :, :]
         actions = self.action_memory[indices]
         rewards = self.reward_memory[indices]
         terminals = self.done_memory[indices]
@@ -381,7 +380,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run the DQN model with the Snake environment')
     parser.add_argument('--n_frames', '-n', type=int, help='Number of frames to train on (default: 1,000,000)', default=1000000)
     parser.add_argument('--n_episodes', '-g', type=int, help='Number of episodes to evaluate on (default: 10)', default=10)
-    parser.add_argument('--max_steps', '-s', type=int, help='Maximum number of frames in evaluation episodes (default: 200)', default=200)
+    parser.add_argument('--max_steps', '-s', type=int, help='Maximum number of frames in evaluation episodes (default: 500)', default=500)
     parser.add_argument('--epsilon', '-e', type=float, help='Epsilon value for evaluation (default: 0.0)', default=0.0)
     parser.add_argument('--mode', '-m', type=str, help='Mode: "test" or "train" (default: "train")', default='train')
     parser.add_argument('--model_file', '-f', type=str, help='Path to tensorflow model file (default: use untrained model)', default=None)
@@ -389,14 +388,20 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Instantiate agent:
-    agent = DQN(mode=args.mode, frames=args.n_frames, file=args.model_file)
+    agent = DQN(mode=args.mode, file=args.model_file)
 
     if args.mode == 'train':
-        agent.train(n_frames = args.n_frames)
+        agent.train()
     else:
         score, game_frames, average_Q = agent.evaluate(
             saved_model = args.model_file,
             n_episodes = args.n_episodes,
             epsilon_eval = args.epsilon,
-            max_steps = args.max_steps,
             render  =  args.render)
+
+    # print("==========")
+    # print("PROFILING")
+    # print("==========")
+    # # cProfile.run('agent.train()', 'train_stats')
+    # p = pstats.Stats('train_stats')
+    # p.sort_stats('cumulative').print_stats(100)
