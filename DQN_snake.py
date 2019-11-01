@@ -104,13 +104,13 @@ class DQN():
                 filters=self.conv1filters, 
                 kernel_size=self.conv1kernel, 
                 strides=self.conv1stride,
-                padding='valid',
+                padding='same',
                 activation='relu')(Normalize)
             x = Conv2D(
                 filters=self.conv2filters, 
                 kernel_size=self.conv2kernel, 
                 strides=self.conv2stride,
-                padding='valid',
+                padding='same',
                 activation='relu')(x)
             x = Flatten()(x)
             x = Dense(self.n_hidden_nodes, activation="tanh")(x)
