@@ -1,17 +1,13 @@
+from datetime import datetime
+import time
+import os
+import argparse
 import numpy as np
 import tensorflow as tf # v2.0
-from tensorflow.keras.layers import Dense, Lambda, Flatten, Conv2D
-from tensorflow.python.client import device_lib
+from tensorflow.keras.layers import Dense, Lambda, Flatten, Conv2D, BatchNormalization
 import matplotlib.pyplot as plt
 import gym
 import gym_snake
-import os
-import time
-from datetime import datetime
-import argparse
-
-import cProfile
-import pstats
 
 class DQN():
     def __init__(self, mode, file):
@@ -23,25 +19,25 @@ class DQN():
         env_name = 'snake-v0'
         self.epsilon = 1.0                    # Starting epsilon value
         self.epsilon_min = 0.1                # Minimum epsilon value
-        self.epsilon_decay_frames = 1000000   # number of frames to decay linearly from epsilon to epsilon_min
+        self.epsilon_decay_frames = 1000000   # number of frames to decay to epsilon_min
         self.gamma = 0.9                      # Future reward discount factor (Bellman equation)
         self.max_memory_size = 1000000        # Replay memory size (number of transitions to store)
-        self.d_min = 10000                    # Disable training before collecting minimum number of transitions
-        self.eval_freq = 100                  # Frequency, in episodes, that evaluation data is pushed to tensorboard
+        self.d_min = 10000                    # Minimum number of transitions before training
+        self.eval_freq = 100                  # Frequency, in episodes, to push to tensorboard
         self.img_stack_count = 1              # Number of images to stack in each input state
 
         # Network parameters:
         self.learning_rate = 0.001            # For RMSProp optimizer
-        self.conv1filters = 16      
+        self.conv1filters = 16
         self.conv1kernel = (8, 8)
-        self.conv1stride = (1, 1)
+        self.conv1stride = (2, 2)
         self.conv2filters = 32
         self.conv2kernel = (4, 4)
-        self.conv2stride = (1, 1)
+        self.conv2stride = (2, 2)
         self.n_hidden_nodes = 512
-        self.batch_size = 32                 # Number of samples in training mini-batch
-        self.model_transfer_freq = 10000     # number of frames between transfer of weights from training network to prediction network
-        self.log_dir = "./logs"              # Directory for tensorboard logs
+        self.batch_size = 128                 # samples in training mini-batch
+        self.model_transfer_freq = 10000      # frames between transfer of weights from training network to prediction network
+        self.log_dir = './logs'               # Directory for tensorboard logs
 
         # Environment details:
         self.grid_height = 10
@@ -69,7 +65,7 @@ class DQN():
         if mode == 'train':
             self.memory_size = min(args.n_frames, self.max_memory_size)
             self.memory = buffer(
-                maxlen=self.memory_size, 
+                maxlen=self.memory_size,
                 state_img_width=self.observations_shape[0],
                 state_img_height=self.observations_shape[1])
 
@@ -77,10 +73,10 @@ class DQN():
         # Disable verbose ouput from tensorflow:
         os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' # Disable Tensorflow log from console
 
-        GPU_name = tf.test.gpu_device_name()
-    
-        if len(GPU_name) > 0:
-            print(f"Available GPUs: {GPU_name}")
+        gpu_name = tf.test.gpu_device_name()
+
+        if len(gpu_name) > 0:
+            print(f"Available GPUs: {gpu_name}")
         else:
             print("CAUTION: No available GPUs. Running on CPU.")
 
@@ -97,26 +93,26 @@ class DQN():
             return model_train, model_predict
 
         else:
-            # If no model file is specified, build a new one:            
+            # If no model file is specified, build a new one:
             Inputs = tf.keras.Input(shape=(self.observations_shape[0], self.observations_shape[1], self.img_stack_count))
             Normalize = Lambda(lambda x: x/255)(Inputs)
             x = Conv2D(
-                filters=self.conv1filters, 
-                kernel_size=self.conv1kernel, 
+                filters=self.conv1filters,
+                kernel_size=self.conv1kernel,
                 strides=self.conv1stride,
                 padding='same',
                 activation='relu')(Normalize)
             x = Conv2D(
-                filters=self.conv2filters, 
-                kernel_size=self.conv2kernel, 
+                filters=self.conv2filters,
+                kernel_size=self.conv2kernel,
                 strides=self.conv2stride,
                 padding='same',
                 activation='relu')(x)
             x = Flatten()(x)
             x = Dense(self.n_hidden_nodes, activation="tanh")(x)
             Output = Dense(self.n_actions, activation="linear")(x)
-            
-            optimizer=tf.optimizers.RMSprop(learning_rate=self.learning_rate) # use default valules
+
+            optimizer = tf.optimizers.RMSprop(learning_rate=self.learning_rate) # use default valules
 
             model_train = tf.keras.Model(inputs=Inputs, outputs=Output)
             model_predict = tf.keras.Model(inputs=Inputs, outputs=Output)
@@ -149,23 +145,22 @@ class DQN():
         if self.frame_count < self.d_min:
             return 0 
 
-        states, actions, rewards, states_new, terminals = self.memory.sample(self.img_stack_count, self.batch_size)
+        # Extract minibatch:
+        lim = min(self.frame_count, self.max_memory_size)
+        states, actions, rewards, states_new, terminals = self.memory.sample(self.img_stack_count, self.batch_size, lim)
 
-        discounted_max_future_reward = self.gamma * np.max(self.model_target.predict_on_batch(states_new), axis = 1)
-        discounted_max_future_reward[np.where(terminals == True)] = 0 # terminal states have no future reward
+        # Calculate discounted max future reward
+        dmfr = self.gamma * np.max(self.model_target.predict_on_batch(states_new), axis = 1)
+        dmfr[np.where(terminals == True)] = 0 # terminal states have no future reward
 
-        # Start with all targets for all actions being same as initial predicted value
+        # Start with targets being same as initial predicted value
         targets = np.array(self.model.predict_on_batch(states))
 
         # Correct the Q values for target actions we actually observed:
-        targets[np.arange(self.batch_size), actions.astype(int)] = rewards + discounted_max_future_reward
+        targets[np.arange(self.batch_size), actions.astype(int)] = rewards + dmfr
 
         loss = self.model.train_on_batch(x=states, y=targets) # Dont use model.fit() - causes severe memory leaks
             
-        if self.frame_count % self.model_transfer_freq == 0:
-            self.model_target.set_weights(self.model.get_weights())
-            self.model.save(f'./snake.h5') # Back up progress thus far
-
         return loss
 
     def preprocess(self, observation):
@@ -180,7 +175,7 @@ class DQN():
         snake[snake == 245] = 200           # Change head value to make it distinct
         snake[np.where(food > 0)] = 0       # Remove food in snake layer
         output = snake*1 + food*0.5         # Compile layers into one, but make snake and food distinct values
-        output = output.astype(np.uint8)    # Save as byte dtype to save memory
+        output = output.astype(np.uint8)    # Save as byte dtype to save space in replay memory
 
         return output
     
@@ -192,12 +187,12 @@ class DQN():
         render: boolean value to display the evaluation episodes or not
         epsilon_eval: probability of selecting a random action (set as 0.05 to avoid moving in 
             loops in partially-trained models)
+        save: string containing save path or None to disable
 
         returns: score, frames, average_Q
         score: average game score (sum(score)/n_episodes)
         frames: Average number of frames for each episode
         average_Q: Average action value for all steps in the game
-        save: string containing save path or None to disable
         '''
 
         if saved_model is None:
@@ -223,8 +218,8 @@ class DQN():
             for step in range(args.max_steps): # game steps
 
                 if np.random.uniform() > epsilon_eval:
-                    input = np.expand_dims(state, axis = 0)
-                    input = np.expand_dims(input, axis = 3)
+                    input = np.expand_dims(state, axis=0)
+                    input = np.expand_dims(input, axis=3)
                     Qs = np.array(play_model.predict_on_batch(input))
                     average_Qs.append(np.mean(Qs))
                     action = int(np.argmax(Qs))
@@ -261,17 +256,11 @@ class DQN():
 
         start_time = time.time()
         print(f"Starting training on {args.n_frames} game frames at {datetime.now()}")
-        print(f"Max frames per episode: {args.max_steps}")        
-        print(f"\nUse tensorboard to view training stats")
-        print(f"Keep this window open, and open a new terminal or command prompt.")
-        print(f"Type the following command:")
-        print(f"\ttensorboard --logdir ./logs/")
-        print(f"Then open a browser window and navigate to http://localhost:6006/")
-        
+        print(f"Max frames per episode: {args.max_steps}")
+        print(f"Use tensorboard to view training stats")
 
         episode = 0
         training_done = False
-            
         while not training_done:
 
             # Get first state
@@ -284,6 +273,10 @@ class DQN():
 
             # Advance the frame count
             self.frame_count += 1
+            if self.frame_count % self.model_transfer_freq == 0:
+                print(f"Saving at {datetime.now()}")
+                self.model_target.set_weights(self.model.get_weights())
+                self.model.save(f'./snake.h5') # Back up progress thus far
 
             for step in range(args.max_steps): # game steps
 
@@ -297,6 +290,10 @@ class DQN():
                 loss = self.train_batch()
 
                 self.frame_count += 1
+                if self.frame_count % self.model_transfer_freq == 0:
+                    print(f"Saving at {datetime.now()}")
+                    self.model_target.set_weights(self.model.get_weights())
+                    self.model.save('./snake.h5') # Back up progress thus far
 
                 if self.frame_count >= (self.d_min + args.n_frames):
                     training_done = True
@@ -305,7 +302,7 @@ class DQN():
 
                     episode += 1
 
-                    if self.frame_count >= (self.d_min) and episode % self.eval_freq == 0:
+                    if episode % self.eval_freq == 0:
 
                         score, game_frames, average_Q = self.evaluate()
 
@@ -323,16 +320,16 @@ class DQN():
 
 class buffer():
     '''
-    Ths class implements a circular buffer system, but also allows that the state only be stored once and indexed. I.e. the state 
+    Ths class implements a circular buffer system, but also allows that the state only be stored once and indexed. I.e. the state
     doesn't need to be stored separately as the starting frame of one transition and the resultant frame of another.
 
     The current memory position is stored in the variable memory_counter, and when memory_counter exceeds maxlen, it is reset to zero.
     '''
     def __init__(self, maxlen, state_img_width, state_img_height):
         self.state_memory = np.zeros(shape=(maxlen, state_img_width, state_img_height), dtype=np.uint8)
-        self.action_memory = np.zeros(shape=maxlen, dtype = np.uint8)
-        self.reward_memory = np.zeros(shape=maxlen, dtype = np.int8) # unsigned - could be negative
-        self.done_memory = np.zeros(shape=maxlen, dtype=np.bool_)   
+        self.action_memory = np.zeros(shape=maxlen, dtype=np.uint8)
+        self.reward_memory = np.zeros(shape=maxlen, dtype=np.int8) # unsigned - could be negative
+        self.done_memory = np.zeros(shape=maxlen, dtype=np.bool_)
         self.train_memory = np.zeros(shape=maxlen, dtype=np.bool_)
         self.memory_counter = 0
         self.maxlen = maxlen
@@ -342,7 +339,7 @@ class buffer():
         Arguments:
         action, reward, state, done: training inputs for a transition (use only final state)
         train: flag to indicate whether the transition is valid for training. The first transition (or transitions if
-            frame stacking is performed) will include transitions from the previous episode, and as such should not be 
+            frame stacking is performed) will include transitions from the previous episode, and as such should not be
             used for training
         '''
         self.action_memory[self.memory_counter] = action
@@ -354,21 +351,22 @@ class buffer():
         # Advance memory counter and return to the beginning if buffer overflows
         self.memory_counter = (self.memory_counter + 1) % self.maxlen
 
-    def sample(self, stack_size, batch_size):
-        
+    def sample(self, stack_size, batch_size, max_frame):
+
         # Extract:
         # Only select from stack_size onwards because there must always be previous frames
         # Also, only select where train_memory flag is True (avoid training where start and end frame(s)
         # are from different episodes)
-        valid_indices = np.where(self.train_memory[stack_size:] == True)[0] 
-        indices = np.random.choice(valid_indices, size=batch_size, replace=False)
+        candidate_indices = np.random.randint(stack_size, max_frame, batch_size*3) # Select sub-batch at random. Speeds up next step to have a smaller sample.
+        valid_indices = candidate_indices[np.where(self.train_memory[candidate_indices] == 1)[0]] # Exclude transitions which occur across episodes 
+        indices = valid_indices[:batch_size] # select final mini-batch (can slice first entries because already randomized)
 
         states = self.state_memory[indices - 1, :, :] # state_memory stores resultant state, so subtract 1 from index to get starting frame
         states_new = self.state_memory[indices, :, :]
         actions = self.action_memory[indices]
         rewards = self.reward_memory[indices]
         terminals = self.done_memory[indices]
-        
+
         states = np.expand_dims(states, axis=3)
         states_new = np.expand_dims(states_new, axis=3)
 
@@ -394,14 +392,7 @@ if __name__ == "__main__":
         agent.train()
     else:
         score, game_frames, average_Q = agent.evaluate(
-            saved_model = args.model_file,
-            n_episodes = args.n_episodes,
-            epsilon_eval = args.epsilon,
-            render  =  args.render)
-
-    # print("==========")
-    # print("PROFILING")
-    # print("==========")
-    # # cProfile.run('agent.train()', 'train_stats')
-    # p = pstats.Stats('train_stats')
-    # p.sort_stats('cumulative').print_stats(100)
+            saved_model=args.model_file,
+            n_episodes=args.n_episodes,
+            epsilon_eval=args.epsilon,
+            render=args.render)
